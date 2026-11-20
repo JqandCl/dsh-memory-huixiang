@@ -1,0 +1,8 @@
+- insert:
+    - id: cyber-hippocampus
+      name: dsh-memory-huixiang
+      config:
+        chainTailLines: 12
+        hotLimit: 3
+        heat:
+          floorFromWeight: 2.5

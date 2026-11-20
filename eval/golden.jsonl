@@ -1,0 +1,8 @@
+{"id":"d01","kind":"paraphrase","query":"我对什么过敏","expect":"demo-allergy"}
+{"id":"d02","kind":"paraphrase","query":"我喝咖啡会睡不着吗","expect":"demo-coffee"}
+{"id":"d03","kind":"update","query":"我现在的通勤方式是地铁吗","expect":"demo-commute"}
+{"id":"d04","kind":"paraphrase","query":"我住哪个城市","expect":"demo-city"}
+{"id":"d05","kind":"abstain","query":"我养过猫吗"}
+{"id":"d06","kind":"abstain","query":"我公司的名字"}
+{"id":"d07","kind":"paraphrase","query":"我喜欢什么颜色的伞","expect":"demo-umbrella"}
+{"id":"d08","kind":"abstain","query":"我小学班主任叫什么"}

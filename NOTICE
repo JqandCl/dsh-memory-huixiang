@@ -1,0 +1,9 @@
+回响（dsh-huixiang）
+
+本项目的词表文件 lib/gate-words.txt 由 jieba 的中文词频表生成，
+jieba 以 MIT 许可证发布：https://github.com/fxsjy/jieba
+
+本项目的设计参考了 cyber-hippocampus（赛博海马体）。回响是在它基础上的改造版：
+保留「一条记忆一个 md 文件」的外文库做法，重写了召回、注入结构、人格分层与整理逻辑。
+
+MIT License. 见 LICENSE。

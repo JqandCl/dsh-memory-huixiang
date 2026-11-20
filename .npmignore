@@ -1,0 +1,15 @@
+# npm 包的兜底排除：files 白名单之外，防 *.bak / rollback 被意外带进包（2026-11-20 复核 P0）。
+*.bak
+*.bak-*
+*.pre-*
+rollback/
+test/
+demo/
+eval/
+scripts/
+.gitignore
+.github/
+node_modules/
+store/
+data/
+*.log

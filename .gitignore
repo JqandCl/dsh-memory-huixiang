@@ -1,0 +1,14 @@
+# 备份与旧文件
+*.bak
+*.bak-*
+*.pre-*
+rollback/
+# 运行时数据（真库在 ~/.dsh/cyber-hippocampus，不在包内）
+store/
+data/
+*.log
+load.log
+.health-log.jsonl
+# 依赖与临时
+node_modules/
+.DS_Store
