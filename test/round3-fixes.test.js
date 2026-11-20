@@ -1,7 +1,7 @@
 // 第三轮：千问复核点出的 B16(CRLF) / B8(0 值语义) / #34(chainTail 负数) / B7(文案)。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { HippocampusStore } from '../lib/store.js'
@@ -80,4 +80,24 @@ test('B7 报错文案与 Unicode 白名单一致（归纳卡 id 里有汉字）'
   assert.equal(bad.ok, false)
   assert.ok(!/只能用字母数字和/.test(bad.error), '文案还写着只许字母数字，但汉字 id 现在合法')
   assert.ok(/汉字|Unicode|中文/.test(bad.error), '文案没提汉字/Unicode')
+})
+
+test('#25 weight: NaN 不穿透到落盘的卡里', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'nanw-'))
+  const store = new HippocampusStore(dir)
+  store.ensure()
+  const c = store.put({ id: 'nan-card', kind: 'experience', source: 'self', body: 'x', weight: NaN })
+  assert.ok(Number.isFinite(c.weight), 'weight 变成 NaN')
+  assert.equal(new HippocampusStore(dir).get('nan-card').weight, 1)
+})
+
+test('#27 记账写不进去不该把召回整条打掉', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'logfail-'))
+  const store = new HippocampusStore(dir)
+  store.ensure()
+  store.put({ id: 'k1', kind: 'experience', source: 'self', body: 'x' })
+  // 让记账路径是一个已存在的目录：ensure 看到「文件存在」就跳过，append 时抛 EISDIR。
+  mkdirSync(join(dir, 'as-dir'))
+  store.rehearsalPath = join(dir, 'as-dir')
+  assert.doesNotThrow(() => store.touch('k1', Date.now(), 'q'))
 })
