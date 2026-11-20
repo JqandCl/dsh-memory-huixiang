@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory-huixiang",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "你的 AI 是不是每次开新对话就忘了你是谁？回响给它一块记得住你的记忆——存在你自己电脑里，不经过任何云端。基于 cyber-hippocampus（赛博海马体）改造。",
   "license": "MIT",
   "repository": {

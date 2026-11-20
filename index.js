@@ -164,7 +164,7 @@ const catalogLimit = countOr(config.catalogLimit, 130)
   // 加载标记（抄 dsh-hippocampus 0.3.1 的 load.log，2026-11-16）：重启后 tail 一下就知道
   // 跑的是哪版、读的是哪份库、卡片几张；写不进去不拦插件——标记是给自己看的，不是功能。
   try {
-    appendFileSync(`${dataDir}/load.log`, `${new Date().toISOString()} loaded v${PKG_VERSION} cards=${store.all().length} dataDir=${dataDir} pid=${process.pid}\n`)
+    appendFileSync(join(dataDir, 'load.log'), `${new Date().toISOString()} loaded v${PKG_VERSION} cards=${store.all().length} dataDir=${dataDir} pid=${process.pid}\n`)
   } catch { /* 标记失败不拦插件 */ }
   // 每日体检补偿（2026-11-14 审查：04:30 定时任务的投递记录在，脚本却没留下记录——手机那时多半不在线）。
   // 启动后补跑一次：只认真库、只认「今天还没有记录」，测试进程一概不碰。
@@ -198,8 +198,19 @@ const catalogLimit = countOr(config.catalogLimit, 130)
     timer.unref?.()
     return () => clearTimeout(timer)
   }, 'cyber-hippocampus: health catch-up')
+  // 卸载/热重载后，setImmediate 里排队的做梦不该再去碰已经放开的 store（2026-11-21 #12）。
+  let disposed = false
+  ctx.effect(() => () => { disposed = true }, 'cyber-hippocampus: dispose flag')
   // trace 使用侧：每个会话最近几次注入各记一条（各自带 iid 和被引用集合），别整体覆盖。
   const injectedBySid = new Map() // sid -> [{ iid, ids, used: Set }]
+  // 这几个 Map 只增不删，长跑会随会话数一直涨（2026-11-21 #7）：超过 200 个就丢最旧的一批。
+  function trimSidMap(map, max = 200) {
+    if (map.size <= max) return
+    for (const k of map.keys()) {
+      if (map.size <= Math.floor(max * 0.8)) break
+      map.delete(k)
+    }
+  }
   const INJECT_HISTORY = 5
   let injectSeq = 0
   let lastSessionId = '' // 事件里最后一次见到的会话；工具执行拿得到 session 时只用它兜底
@@ -581,6 +592,7 @@ const catalogLimit = countOr(config.catalogLimit, 130)
           // 判死跟 cue 路径同口径：valid_until 写纯日期时按本地日界算，别拿 Date.parse 当 UTC 零点（2026-11-21 B3）。
           const isDeadCard = (c) => isDead(c, Date.now())
           const picked = []
+          const seenIds = new Set()
           const missed = []
           const ambiguous = []
           const cueOf = new Map()
@@ -591,7 +603,8 @@ const catalogLimit = countOr(config.catalogLimit, 130)
             const hit = allIds.includes(w) ? [w] : (tail4.get(w) || [])
             if (hit.length === 1) {
               const card = store.get(hit[0])
-              if (card) { picked.push(card); cueOf.set(card.id, raw) }
+              // 同一张卡在 ids 里出现两次时只取一次（否则重复 touch、返回值也重复，2026-11-21 #2）。
+              if (card && !seenIds.has(card.id)) { seenIds.add(card.id); picked.push(card); cueOf.set(card.id, raw) }
               else missed.push(w)
             } else if (hit.length > 1) {
               ambiguous.push({ 短id: w, 候选: hit.slice(0, 4) })
@@ -758,8 +771,10 @@ const catalogLimit = countOr(config.catalogLimit, 130)
           const r = store.addSelfNote(args.write)
           return { ok: true, ...r }
         }
-        const notes = store.selfNotes().slice(-(args.last || 3))
-        return { ok: true, count: store.selfNotes().length, notes }
+        // 传负数/0/怪值时别让 slice 跑偏，也别为读一次笔记扫两遍盘（2026-11-21 #4）。
+        const last = Math.min(40, Math.max(1, Math.trunc(Number(args.last) || 3)))
+        const all = store.selfNotes()
+        return { ok: true, count: all.length, notes: all.slice(-last) }
       },
     },
     {
@@ -794,7 +809,11 @@ const catalogLimit = countOr(config.catalogLimit, 130)
       },
       output: TEXT({ type: 'object' }),
       isConcurrencySafe: () => false,
-      execute: async (args) => ({ ok: true, ...dreamPass(store, { dryRun: args.dryRun !== false, lookbackDays: args.lookbackDays || 14 }) }),
+      execute: async (args) => {
+        // 0 会被 || 改写成 14，负数会让窗口取反（2026-11-21 #5）。
+        const days = Math.min(365, Math.max(1, Math.trunc(Number(args.lookbackDays) || 14)))
+        return { ok: true, ...dreamPass(store, { dryRun: args.dryRun !== false, lookbackDays: days }) }
+      },
     },
     {
       name: 'hc_status',
@@ -874,11 +893,13 @@ const catalogLimit = countOr(config.catalogLimit, 130)
       const who = type === 'user/message' ? 'owner' : 'self'
       // B 级「用上了」证据先记：写链/写流失败不该连带把 use 行也丢了。
       if (type === 'assistant/message') recordTextUse(session?.id || '', body)
-      store.appendChain(who, body)
-      store.appendStream({ role: who, text: body, sessionId: session?.id || '' })
+      // 两条流水各写各的：一条失败不该把另一条也带走，也别静默吞掉（2026-11-21 #13）。
+      try { store.appendChain(who, body) } catch (err) { console.warn('[cyber-hippocampus] 因果链写失败：', err?.message || err) }
+      try { store.appendStream({ role: who, text: body, sessionId: session?.id || '' }) } catch (err) { console.warn('[cyber-hippocampus] 原话流水写失败：', err?.message || err) }
       // 按量做梦：攒够就后台归一次，别在事件钩子里同步跑（做梦要读全库、写盘）。
       if (autoDream.enabled) {
         setImmediate(() => {
+          if (disposed) return
           try {
             const r = maybeDream(store, autoDream)
             if (r.ran) console.log('[cyber-hippocampus] 按量做梦：整理了', r.wrote, '条，stream 到第', r.total, '行')
@@ -941,10 +962,12 @@ const catalogLimit = countOr(config.catalogLimit, 130)
       const ok = store.trace({ at: new Date(now).toISOString(), ev: 'inject', sid, ids, n: ids.length, iid })
       if (ok) {
         lastInject.set(sid, { key, at: now })
+        trimSidMap(lastInject)
         const hist = injectedBySid.get(sid) || []
         hist.push({ iid, ids, used: new Set() })
         if (hist.length > INJECT_HISTORY) hist.shift()
         injectedBySid.set(sid, hist)
+        trimSidMap(injectedBySid)
       }
       else console.warn('[cyber-hippocampus] trace 写入失败，这一条注入流水漏记')
     } catch {
@@ -964,7 +987,7 @@ const catalogLimit = countOr(config.catalogLimit, 130)
       const now = Date.now()
       const prev = lastBrief.get(sid)
       if (prev && prev.key === key && now - prev.at < INJECT_DEDUPE_MS) return
-      if (store.trace({ at: new Date(now).toISOString(), ev: 'brief', sid, ids, n: ids.length })) lastBrief.set(sid, { key, at: now })
+      if (store.trace({ at: new Date(now).toISOString(), ev: 'brief', sid, ids, n: ids.length })) { lastBrief.set(sid, { key, at: now }); trimSidMap(lastBrief) }
     } catch {
       // 记不上不能影响对话。
     }
