@@ -110,27 +110,53 @@ function extractText(payload, depth = 0) {
   return ''
 }
 
+/**
+ * heat 配置归一（2026-11-21 B8 修正）：
+ * - 只认有限数字；
+ * - 少数键的 0 有明确语义（禁加成 / 立即冷 / 禁地板 / 不去重），其余键必须 > 0；
+ * - 不认识的键打一行 warn —— 拼错 halfLifeDayz 不该静默无效。
+ */
+export function normalizeHeat(input) {
+  const heat = { ...DEFAULT_HEAT }
+  if (!input || typeof input !== 'object') return heat
+  const ZERO_OK = new Set(['rehearseBoost', 'coldAfterDays', 'floorWeight', 'dedupeWindowMs'])
+  for (const [k, v] of Object.entries(input)) {
+    if (!Object.prototype.hasOwnProperty.call(DEFAULT_HEAT, k)) {
+      console.warn(`[cyber-hippocampus] 不认识的 heat 配置键：${k}（可用：${Object.keys(DEFAULT_HEAT).join(', ')}）`)
+      continue
+    }
+    if (typeof v !== 'number' || !Number.isFinite(v)) {
+      console.warn(`[cyber-hippocampus] heat.${k} 不是有限数字，已忽略`)
+      continue
+    }
+    if (v < 0 || (v === 0 && !ZERO_OK.has(k))) {
+      console.warn(`[cyber-hippocampus] heat.${k}=${v} 不合法，已忽略`)
+      continue
+    }
+    heat[k] = v
+  }
+  return heat
+}
+
 export async function apply(ctx, config = {}) {
   const dataDir = clean(config.dataDir) || DEFAULT_DATA_DIR
-  // config.heat 原先直接展开：halfLifeDays:0 让全库秒冷、负数越久越重、NaN 落盘变字符串（2026-11-21 B8）。
-  // 只认正有限数，非法值一律回退默认。
-  const heat = { ...DEFAULT_HEAT }
-  for (const [k, v] of Object.entries(config.heat && typeof config.heat === 'object' ? config.heat : {})) {
-    if (typeof v === 'number' && Number.isFinite(v) && v > 0) heat[k] = v
-  }
-  const chainTailLines = Number.isSafeInteger(config.chainTailLines) ? config.chainTailLines : 12
-  const hotLimit = Number.isSafeInteger(config.hotLimit) ? config.hotLimit : 3
+  const heat = normalizeHeat(config.heat)
+  // 这几个键的 0 有语义（0 行、0 条、不冷却），负数与 NaN 一律回退默认（2026-11-21 #11/#34）。
+  const countOr = (v, dflt) => (Number.isSafeInteger(v) && v >= 0 ? v : dflt)
+  const chainTailLines = countOr(config.chainTailLines, 12)
+  const hotLimit = countOr(config.hotLimit, 3)
   // 折叠日志路径：config.compressionLog 优先；留空则走 lib/prompt.js 的 env/默认值。
   const compressionLog = clean(config.compressionLog) || ''
 // 便签条数（「大概记得」区）：主人 2026-11-14 允许适当多带，默认 20 条。
-const briefLimit = Number.isSafeInteger(config.briefLimit) ? config.briefLimit : 20
+const briefLimit = countOr(config.briefLimit, 20)
 // 目录那一层的条数上限（2026-11-19 主人定 A 案）：原来写死 200，179 张就把 9000 字符预算吃到 98.7%；默认收到 130，余量回到 ~900。
-const catalogLimit = Number.isSafeInteger(config.catalogLimit) ? config.catalogLimit : 130
+const catalogLimit = countOr(config.catalogLimit, 130)
   // 按量做梦（2026-11-12）：不等定时器，stream 攒够行数就整理一次。可在配置里关。
   const autoDream = {
     enabled: config?.autoDream?.enabled !== false,
-    everyLines: Number.isSafeInteger(config?.autoDream?.everyLines) ? config.autoDream.everyLines : 20,
-    cooldownMs: Number.isSafeInteger(config?.autoDream?.cooldownMs) ? config.autoDream.cooldownMs : 3_600_000,
+    // everyLines 不能是 0：那样每轮都梦、每轮扫全库。cooldownMs=0 合法（测试与调试用）。
+    everyLines: Number.isSafeInteger(config?.autoDream?.everyLines) && config.autoDream.everyLines > 0 ? config.autoDream.everyLines : 20,
+    cooldownMs: countOr(config?.autoDream?.cooldownMs, 3_600_000),
     dryRun: config?.autoDream?.dryRun === true,
   }
   const store = new HippocampusStore(dataDir, heat)
@@ -219,7 +245,7 @@ const catalogLimit = Number.isSafeInteger(config.catalogLimit) ? config.catalogL
     // id 直接进文件名，别让它穿出 notes 目录。
     const wantId = clean(args.id)
     // 与 store 层同口径（含 Unicode，归纳卡 id 形如 ins-体检-abc123）。两层白名单打架会让归纳卡永远续写不了（2026-11-21 B7）。
-    if (wantId && !isSafeId(wantId)) return { ok: false, error: 'id 只能用字母数字和 . _ -，且不能包含 ..' }
+    if (wantId && !isSafeId(wantId)) return { ok: false, error: 'id 只能用汉字、字母、数字和 . _ -，且不能包含 ..' }
     // 幂等键：只认「同一调用方同一份输入」。正文不做归一化——归一化会把「差一个标点」也算同一句，
     // 那是去重该管的边界，不是重试该管的。
     // 幂等键＝「同一次请求」的指纹：所有会改变写入结果的入参都进去。
