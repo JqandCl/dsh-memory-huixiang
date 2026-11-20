@@ -30,7 +30,7 @@ dsh plugin --profile web add dsh-memory-huixiang
 **方式二（源码）**
 
 ```bash
-git clone <仓库地址> ~/.dsh/plugin-src/dsh-memory-huixiang
+git clone https://github.com/JqandCl/dsh-memory-huixiang.git ~/.dsh/plugin-src/dsh-memory-huixiang
 dsh plugin --profile web add link:~/.dsh/plugin-src/dsh-memory-huixiang
 ```
 

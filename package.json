@@ -3,6 +3,14 @@
   "version": "0.1.1",
   "description": "回响（HuiXiang）：给 AI 一个记得住人的本地记忆库。纯文本外文库 + 记忆重量 + 因果链 + 触发词召回 + 自我笔记 + 人格底色/状态分离，冷记忆不占上下文。基于 cyber-hippocampus（赛博海马体）改造。",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JqandCl/dsh-memory-huixiang.git"
+  },
+  "homepage": "https://github.com/JqandCl/dsh-memory-huixiang#readme",
+  "bugs": {
+    "url": "https://github.com/JqandCl/dsh-memory-huixiang/issues"
+  },
   "type": "module",
   "main": "index.js",
   "scripts": {
