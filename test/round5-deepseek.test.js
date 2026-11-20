@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expiryMs } from '../lib/heat.js'
 import { parseCue } from '../lib/parse.js'
-import { safeCut } from '../lib/prompt.js'
+import { safeCut, renderSnapshot } from '../lib/prompt.js'
+import { isDead } from '../lib/recall.js'
 import { dreamPass } from '../lib/dream.js'
 import { HippocampusStore } from '../lib/store.js'
 
@@ -43,6 +44,7 @@ test('#35 截断不切坏 emoji 代理对', () => {
   assert.equal(safeCut('', 10), '')
 })
 
+// 注：旧式 now - Date.parse <= 对坏 created 得 NaN 也是 false，行为本来就对；这条是回归保护，不是修复验证（2026-11-21 只读复核实测旧码同样绿）。
 test('#40 created 坏掉的卡不进归纳池，也不拖垮其它卡', () => {
   const { store, done } = tempStore()
   try {
@@ -72,6 +74,7 @@ test('#38 落盘失败时进 skipped，不让整次做梦失败', () => {
   } finally { done() }
 })
 
+// 注：两次调用很难真落在同一毫秒，这条挡的是「文件名加了随机尾巴后不许反向退化」，旧码连跑 5 次也绿；同毫秒真撞的概率约 1/46656，属可接受残余（2026-11-21 只读复核）。
 test('#26 同一毫秒存两次历史，两份都要留下（后一份不能覆盖前一份）', () => {
   const { store, done } = tempStore()
   try {
@@ -84,5 +87,16 @@ test('#26 同一毫秒存两次历史，两份都要留下（后一份不能覆�
     store.saveHistory(b)
     const files = readdirSync(join(store.dir, 'history', 'hist-same-ms')).filter((f) => f.endsWith('.md'))
     assert.ok(files.length >= 2, '同毫秒两次历史应各留一份，实际 ' + files.length)
+  } finally { done() }
+})
+test('#15 非法日期不算过期：isDead 放行、注入也不许标「已过期」（两处口径要一致）', () => {
+  const { store, done } = tempStore()
+  try {
+    const ts = Date.now()
+    store.put({ id: 'bad-date', kind: 'experience', title: '日期写错的卡', body: '这张卡的 valid_until 写成了不存在的日子，按既有约定当作没写有效期。', valid_until: '2026-02-30', created: new Date(ts).toISOString(), last_hit: ts })
+    const card = store.get('bad-date')
+    assert.equal(isDead(card, ts), false, '日期读不懂按「无有效期」处理（lib/recall.js:132 的既有约定）')
+    const out = renderSnapshot({ store, hot: [card], now: ts })
+    assert.ok(!out.includes('已过期'), '既然 isDead 放行，注入里就不能同时写「已过期」')
   } finally { done() }
 })
