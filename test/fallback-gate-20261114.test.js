@@ -29,7 +29,8 @@ async function boot() {
   return { store, call }
 }
 
-const day = (n) => new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10)
+// 与生产代码同口径：本地日期（#1 之前这里是 UTC，晚上跑测试会差一天）。
+const day = (n) => new Date(Date.now() + n * 86_400_000).toLocaleDateString('en-CA')
 const now = Date.now()
 const NOISE = '南极 企鹅 冰川 火山 岩浆 珊瑚 海藻 绒鸭'
 

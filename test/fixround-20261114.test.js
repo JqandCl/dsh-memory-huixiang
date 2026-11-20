@@ -29,7 +29,8 @@ async function boot() {
   return { store, call }
 }
 
-const day = (n) => new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10)
+// 与生产代码同口径：本地日期（#1 之前这里是 UTC，晚上跑测试会差一天）。
+const day = (n) => new Date(Date.now() + n * 86_400_000).toLocaleDateString('en-CA')
 
 test('续写已接替的卡：清死因、解反向链、返回里说明', async () => {
   const { store, call } = await boot()

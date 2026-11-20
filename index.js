@@ -12,7 +12,7 @@
  */
 import { HippocampusStore, DEFAULT_DATA_DIR, isSafeId } from './lib/store.js'
 import { hotForInjection, injectionBriefs, recallByCue, shouldRecall, keywordFallback, firstLine, tokenize, answerable, entityGate, hopNeighbors, isDead } from './lib/recall.js'
-import { occasionDays, streamLeads } from './lib/stream.js'
+import { localDay, occasionDays, streamLeads } from './lib/stream.js'
 import { dreamPass } from './lib/dream.js'
 import { maybeDream } from './lib/autodream.js'
 import { CONTEXT_NAME, CONTEXT_ORDER, POLICY_NAME, POLICY_TEXT, SECTION_ORDER, renderSnapshot } from './lib/prompt.js'
@@ -37,7 +37,7 @@ const SOURCE_TYPES = new Set(['owner-said', 'evidence-found', 'no-evidence'])
 const boundaryDefaults = (src, condition, validUntil) => {
   if (condition || validUntil) return { condition, validUntil, note: '' }
   if (src === 'owner') return { condition: '主人改口或情况变化前一直算数', validUntil, note: '没写边界：已按「主人亲口、改口前有效」记下' }
-  const until = new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10)
+  const until = localDay(Date.now() + 30 * 86_400_000)
   return { condition, validUntil: until, note: `没写边界：已按临时情报处理（${until} 到期）` }
 }
 
@@ -182,6 +182,11 @@ const catalogLimit = countOr(config.catalogLimit, 130)
       if (lines.length) { try { lastAt = String(JSON.parse(lines[lines.length - 1]).at || '') } catch { /* 坏行就当没记录 */ } }
       if (lastAt.startsWith(todayStamp)) return
       execFile('bash', [HEALTH_SCRIPT], { timeout: 180_000 }, (err, stdout) => {
+        if (err && (err.code === 'ENOENT' || err.code === 'EACCES')) {
+          // Windows 默认没有 bash：这不是「体检失败」，是这台机器上根本没这条命令（2026-11-21 #9）。
+          console.log('[cyber-hippocampus] 体检跳过：找不到可执行的 bash。Windows 用户可把 config.healthScript 指向一个 node 脚本。', err.message)
+          return
+        }
         const head = String(stdout || '').trim().split('\n')[0]
         console.log('[cyber-hippocampus] 体检补跑：', err ? `失败 ${err.message}` : head)
       })
@@ -393,7 +398,7 @@ const catalogLimit = countOr(config.catalogLimit, 130)
     if (增量来源) body = `补：${增量来源.title || 增量来源.id}（${增量来源.id}）\n${body}`
     // 2026-11-14 审查（严重）：按 id 续写会把旧卡的 superseded_by 原样带回来 —— 返回 ok，卡却永远查不到、也不注入。
     // 续写的意思就是「这张卡还活着」：显式清死因；旧的有效期已经过期、这次又没给新的，也一并清掉，并在返回里说明。
-    const todayStr = new Date().toISOString().slice(0, 10)
+    const todayStr = localDay(Date.now())
     const 旧死因 = prev?.superseded_by ? `已被 ${prev.superseded_by} 接替` : ''
     const 旧已过期 = prev?.valid_until && prev.valid_until < todayStr ? `旧有效期 ${prev.valid_until} 已过` : ''
     const 复活 = Boolean(旧死因 || 旧已过期)
@@ -419,7 +424,7 @@ const catalogLimit = countOr(config.catalogLimit, 130)
       // 泛标题会在 occasionDays 里被 df 过滤掉（结果=0 个场合 → 降级，这是正确方向）。
       const { days } = occasionDays(store, clean(args.title) || firstLine(body))
       if (days.length < 3) {
-        nextValidUntil = new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10)
+        nextValidUntil = localDay(Date.now() + 30 * 86_400_000)
         场合说明 = `样本不足（原话里只见过 ${days.length} 个场合 < 3），先当临时情报，${nextValidUntil} 到期；多碰到几次再升成长期`
       }
     }
