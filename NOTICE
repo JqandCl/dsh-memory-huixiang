@@ -3,7 +3,15 @@
 本项目的词表文件 lib/gate-words.txt 由 jieba 的中文词频表生成，
 jieba 以 MIT 许可证发布：https://github.com/fxsjy/jieba
 
-本项目的设计参考了 cyber-hippocampus（赛博海马体）。回响是在它基础上的改造版：
-保留「一条记忆一个 md 文件」的外文库做法，重写了召回、注入结构、人格分层与整理逻辑。
+本项目是 dsh-hippocampus（常被叫作「赛博海马体」）的改造版：
+
+  上游：https://github.com/kianajunjie/dsh-hippocampus
+  作者：kianajunjie
+  许可：MIT
+
+保留：一条记忆一个 .md 文件的外文库做法。
+重写：召回、注入结构、人格分层、整理与写入闸。
+
+上游的 MIT 许可与版权声明适用于其原始作品；本项目的改动同样以 MIT 发布。
 
 MIT License. 见 LICENSE。
