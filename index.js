@@ -10,8 +10,8 @@
  *   ⑥ 人格连续（BV1dDxC67Ep3）：底色 + 当前状态分开存，状态变更留史
  *   ⑦ 关系细节（BV1dDxC67Ep3）：知识/经历分开，矛盾保留，来源与有效期都标
  */
-import { HippocampusStore, DEFAULT_DATA_DIR } from './lib/store.js'
-import { hotForInjection, injectionBriefs, recallByCue, shouldRecall, keywordFallback, firstLine, tokenize, answerable, entityGate, hopNeighbors } from './lib/recall.js'
+import { HippocampusStore, DEFAULT_DATA_DIR, isSafeId } from './lib/store.js'
+import { hotForInjection, injectionBriefs, recallByCue, shouldRecall, keywordFallback, firstLine, tokenize, answerable, entityGate, hopNeighbors, isDead } from './lib/recall.js'
 import { occasionDays, streamLeads } from './lib/stream.js'
 import { dreamPass } from './lib/dream.js'
 import { maybeDream } from './lib/autodream.js'
@@ -112,7 +112,12 @@ function extractText(payload, depth = 0) {
 
 export async function apply(ctx, config = {}) {
   const dataDir = clean(config.dataDir) || DEFAULT_DATA_DIR
-  const heat = { ...DEFAULT_HEAT, ...(config.heat || {}) }
+  // config.heat 原先直接展开：halfLifeDays:0 让全库秒冷、负数越久越重、NaN 落盘变字符串（2026-11-21 B8）。
+  // 只认正有限数，非法值一律回退默认。
+  const heat = { ...DEFAULT_HEAT }
+  for (const [k, v] of Object.entries(config.heat && typeof config.heat === 'object' ? config.heat : {})) {
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) heat[k] = v
+  }
   const chainTailLines = Number.isSafeInteger(config.chainTailLines) ? config.chainTailLines : 12
   const hotLimit = Number.isSafeInteger(config.hotLimit) ? config.hotLimit : 3
   // 折叠日志路径：config.compressionLog 优先；留空则走 lib/prompt.js 的 env/默认值。
@@ -213,8 +218,8 @@ const catalogLimit = Number.isSafeInteger(config.catalogLimit) ? config.catalogL
     const 本次sourceType = SOURCE_TYPES.has(args.source_type) ? args.source_type : undefined
     // id 直接进文件名，别让它穿出 notes 目录。
     const wantId = clean(args.id)
-    if (wantId && !/^[A-Za-z0-9._-]+$/.test(wantId)) return { ok: false, error: 'id 只能用字母数字和 . _ -' }
-    if (wantId.includes('..')) return { ok: false, error: 'id 不能包含 ..' }
+    // 与 store 层同口径（含 Unicode，归纳卡 id 形如 ins-体检-abc123）。两层白名单打架会让归纳卡永远续写不了（2026-11-21 B7）。
+    if (wantId && !isSafeId(wantId)) return { ok: false, error: 'id 只能用字母数字和 . _ -，且不能包含 ..' }
     // 幂等键：只认「同一调用方同一份输入」。正文不做归一化——归一化会把「差一个标点」也算同一句，
     // 那是去重该管的边界，不是重试该管的。
     // 幂等键＝「同一次请求」的指纹：所有会改变写入结果的入参都进去。
@@ -542,7 +547,8 @@ const catalogLimit = Number.isSafeInteger(config.catalogLimit) ? config.catalogL
             if (!tail4.has(t)) tail4.set(t, [])
             tail4.get(t).push(id)
           }
-          const isDeadCard = (c) => Boolean(c.superseded_by) || Boolean(c.valid_until && Date.parse(c.valid_until) < Date.now())
+          // 判死跟 cue 路径同口径：valid_until 写纯日期时按本地日界算，别拿 Date.parse 当 UTC 零点（2026-11-21 B3）。
+          const isDeadCard = (c) => isDead(c, Date.now())
           const picked = []
           const missed = []
           const ambiguous = []
@@ -591,7 +597,8 @@ const catalogLimit = Number.isSafeInteger(config.catalogLimit) ? config.catalogL
         // 这是手动翻库（本鲸自己决定要查），不该被「像不像在翻旧事」的门控挡住：
         // 原来单字线索（猫/雨/酒）一律被拦，等于查不了。门控只留给自动检索那条路。
 
-        const limit = Math.min(Math.max(Math.trunc(args.limit ?? 3), 1), 10)
+        // limit 传字符串/NaN 时 Math.trunc 得 NaN → slice(0,NaN)=[] → 命中被吞成 not_found（2026-11-21 B9）。
+        const limit = Math.min(Math.max(Math.trunc(Number(args.limit) || 3), 1), 10)
         const opts = { limit, includeSuperseded: args.includeSuperseded === true }
         const runs = cues.map((c) => ({ cue: c, r: recallByCue(store, c, opts) }))
         // 合并：同一张卡只留分数最高那次，并记住是哪句说法捞到的（记账要用真的那句）。
@@ -647,7 +654,8 @@ const catalogLimit = Number.isSafeInteger(config.catalogLimit) ? config.catalogL
         let gateNote = ''
         if (status !== 'not_found' && items.length) {
           const fullTop = store.get(items[0].id) || items[0]
-          const g = answerable(String(args.cue ?? cues[0] ?? ''), [fullTop])
+          // 多说法时闸要核「真正捞到头名的那句」，核 cues[0] 会把第二句捞到的卡误弃权（2026-11-21 B10）。
+          const g = answerable(String(topRun?.cue ?? args.cue ?? cues[0] ?? ''), [fullTop])
           if (!g.ok) {
             status = 'not_found'
             items.length = 0
