@@ -712,9 +712,16 @@ const catalogLimit = countOr(config.catalogLimit, 130)
         }
         // 被 limit 截断时说一句：让模型知道库里还有更多，值得把 limit 调大再查一次，
         // 而不是以为「库里就这几条」直接作答（2026-11-21 全量 500 题：多段题就吃亏在这）。
-        const 候选总数 = Number(topRun?.r.候选总数 || 0)
-        if (status === 'matched' && 候选总数 > items.length) {
-          reason = (reason ? `${reason}；` : '') + `库里还有 ${候选总数 - items.length} 条相关，要看得更全就把 limit 调大再查一次`
+        // 多说法时按并集算候选：只取头名那句会少报（P2）。
+        const 并集 = new Set()
+        for (const { r } of runs) for (const id of r.候选ids || []) 并集.add(id)
+        const 候选总数 = 并集.size || Number(topRun?.r.候选总数 || 0)
+        const 还有 = 候选总数 - items.length
+        if (还有 > 0 && status === 'matched') {
+          reason = (reason ? `${reason}；` : '') + `库里还有 ${还有} 条相关，要看得更全就把 limit 调大再查一次`
+        } else if (还有 > 0 && status === 'ambiguous') {
+          // 含糊时 limit 调大没用（只给 3 张），要的是补一句线索。
+          reason = (reason ? `${reason}；` : '') + `库里还有 ${还有} 条相近的，说是哪件事我再挑`
         }
         const result = {
           status,
@@ -862,19 +869,11 @@ const catalogLimit = countOr(config.catalogLimit, 130)
 
   for (const def of definitions) ctx.effect(() => ctx.tools.register(def), `cyber-hippocampus: ${def.name}`)
 
-  // 一轮压缩会被拆成好多条 prune，先攒着，等 end/summary 时记成一笔。
-  // 按会话分开：两个窗口可能同时在压自己的历史，共用一个变量会串账、丢账（2026-11-21 #6）。
-  const foldings = new Map()
-  const FOLD_TTL_MS = 60 * 60 * 1000 // 只见 start 不见 end 的僵尸账，1 小时后自清，别越攒越多
-  const foldOf = (key, now = Date.now()) => {
-    for (const [k, v] of foldings) if (now - v.at > FOLD_TTL_MS) foldings.delete(k)
-    let f = foldings.get(key)
-    if (!f) {
-      f = { tokens: 0, seqStart: null, seqEnd: null, at: now }
-      foldings.set(key, f)
-    }
-    return f
-  }
+  // 折叠账（2026-11-21 复核 P1）：只在 compaction/summary 落一笔，不再跨事件攒。
+  // 宿主真实顺序是 start → summary → end（dsh-compaction-basic/lib/index.js:472 / :637 / :487），
+  // 而 compaction/prune 是「工具结果瘦身」发的影子定价事件（dsh-compaction-tool-result-pruner/lib/index.js:169），
+  // 它不属于这条事务、还早于 start。原来拿 prune 累加、又被 start 清零，到 summary 时恒为 0 ——
+  // compactions.jsonl 从 2026-11-05 建库起一行都没写进去，这就是 bug 的铁证。
 
   ctx.on('session/event', (session, event) => {
     try {
@@ -883,26 +882,26 @@ const catalogLimit = countOr(config.catalogLimit, 130)
       const data = event?.data ?? event ?? {}
       const foldKey = String(session?.id || '')
 
-      if (type === 'compaction/start') {
-        foldings.set(foldKey, { tokens: 0, seqStart: null, seqEnd: null, at: Date.now() })
-        return
-      }
-      if (type === 'compaction/prune') {
-        const f = foldOf(foldKey)
-        f.at = Date.now()
-        f.tokens += Number(data.shadowedTokenCount) || 0
+      if (type === 'compaction/summary') {
+        const tokens = Number(data?.shadowedTokenCount) || 0
         const start = data?.shadowedRange?.start
         const end = data?.shadowedRange?.end
-        if (Number.isFinite(start)) f.seqStart = f.seqStart === null ? start : Math.min(f.seqStart, start)
-        if (Number.isFinite(end)) f.seqEnd = f.seqEnd === null ? end : Math.max(f.seqEnd, end)
+        if (tokens > 0) {
+          try {
+            // 带上会话 id：账只归这一窗，别让另一个窗口的【刚被折叠】念别人压掉的那段（P3）。
+            store.recordCompaction({
+              tokens,
+              seqStart: Number.isFinite(start) ? start : null,
+              seqEnd: Number.isFinite(end) ? end : null,
+              sid: foldKey,
+            })
+          } catch (err) {
+            console.warn('[cyber-hippocampus] 折叠账写失败：', err?.message || err)
+          }
+        }
         return
       }
-      if (type === 'compaction/summary' || type === 'compaction/end') {
-        const f = foldings.get(foldKey)
-        if (f && f.tokens > 0) store.recordCompaction(f)
-        foldings.delete(foldKey)
-        return
-      }
+      if (type === 'compaction/start' || type === 'compaction/end' || type === 'compaction/prune') return
 
       // 因果链 + 原话流水：每轮把「主人说的」「本鲸回的最后一句」都记下来。
       if (type !== 'user/message' && type !== 'assistant/message') return
@@ -1039,7 +1038,11 @@ const catalogLimit = countOr(config.catalogLimit, 130)
               recordBrief(asm, briefs)
               // 注入侧写降级账：warn 非空说明这轮少给了东西，打一行日志但不抛（抛了整轮会话就没了）。
               const stats = {}
-              const snapshot = renderSnapshot({ store, hot, briefs, catalog, catalogTotal, chainLines: chainTailLines, now, totalCards: cards.length, compressionLog, stats })
+              const snapshot = renderSnapshot({
+                store, hot, briefs, catalog, catalogTotal,
+                chainLines: chainTailLines, now, totalCards: cards.length, compressionLog, stats,
+                sid: asm?.agent?.session?.id || '',
+              })
               if (stats.warn) console.warn(`[hippocampus] ${stats.warn}`)
               return snapshot
             } catch (err) {

@@ -183,7 +183,7 @@ dsh plugin --profile web add link:~/.dsh/plugin-src/dsh-memory-huixiang
 以下命令**只在源码树里跑**——npm 包不带 `test/`、`demo/`、`eval/`（包只含 `index.js`、`lib/`、`cordis.patch.yml`、`README.md`、`NOTICE`、`LICENSE`）。
 
 ```bash
-node --test                    # 246 个测试全过
+node --test                    # 252 个测试全过
 node demo/simulate.mjs         # 10 项演示，用临时库，不碰真库
 node eval/run.mjs --golden <你的题库.jsonl> --dir <你的库目录>
 ```
@@ -201,7 +201,7 @@ node eval/run.mjs --golden <你的题库.jsonl> --dir <你的库目录>
 - 召回是词面驱动的：换个说法（「家在何方」对「住哪」）可能翻不到。
 - 单机单进程假设：多进程靠 `O_EXCL` 文件锁，不是分布式锁。
 - `stream.jsonl` 会存每一轮原话（单条截断 4000 字）。这是特性也是风险，见「隐私」。
-- 246 个测试覆盖的是核心路径，不是全覆盖。
+- 252 个测试覆盖的是核心路径，不是全覆盖。
 
 ## 隐私
 
