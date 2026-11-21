@@ -16,7 +16,7 @@ import { localDay, occasionDays, streamLeads } from './lib/stream.js'
 import { dreamPass } from './lib/dream.js'
 import { maybeDream } from './lib/autodream.js'
 import { CONTEXT_NAME, CONTEXT_ORDER, POLICY_NAME, POLICY_TEXT, SECTION_ORDER, renderSnapshot } from './lib/prompt.js'
-import { DEFAULT_HEAT, liveWeightOf, tierOfCard } from './lib/heat.js'
+import { DEFAULT_HEAT, liveWeightOf, tierOfCard, expiryMs } from './lib/heat.js'
 import { execFile } from 'node:child_process'
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -30,8 +30,34 @@ export const inject = ['tools']
 const TEXT = (schema) => ({ schema, render: (_a, v) => [{ type: 'text', text: JSON.stringify(v, null, 1) }] })
 const OUT = TEXT({ type: 'object' })
 const clean = (v) => (typeof v === 'string' && v.trim() ? v.trim() : '')
+// 短 id 解析（2026-11-21 三合一复核 B1）：便签行给的是 [xxxx] 尾 4 位，hc_recall 一直认，remember 也得认。
+// 以前 supersedes 直接 store.get(完整 id)，抄了尾 4 位就查不到、被 continue 静默跳过：新卡写进去了，
+// 旧卡还活着，钉住的底线卡（本名/忌口/删除规矩）每轮继续注入旧话。
+// 返回 { want, ids }：0 个=真没这张卡，1 个=唯一解，>1 个=尾巴撞了，别猜。
+function resolveCardRef(store, want, idsList) {
+  const raw = clean(String(want ?? ''))
+  const w = raw.replace(/^[\[【（(]+/, '').replace(/[\]】）)]+$/, '').trim()
+  if (!w) return { want: '', ids: [] }
+  const all = idsList || store.ids()
+  if (all.includes(w)) return { want: w, ids: [w] }
+  return { want: w, ids: all.filter((id) => String(id).slice(-4) === w) }
+}
 // source_type 三值（2026-11-19）：主人亲口 / 找到证据 / 没证据的推断。没传就不写这个字段（老卡行为不变）。
 const SOURCE_TYPES = new Set(['owner-said', 'evidence-found', 'no-evidence'])
+
+// 幂等索引的上限与清扫（A9 / 千问 R7）：原来只有写入、只在「命中但卡已老」时删一个，
+// 长跑进程里每个幂等键都塞一份 {id, at}，只增不减。
+const IDEM_TTL_MS = 10 * 60_000
+const IDEM_MAX = 512
+/** 清掉过期条目；还超上限就按 at 从旧到新删。返回清完的条数。 */
+export function sweepIdem(map, now = Date.now(), max = IDEM_MAX) {
+  for (const [k, v] of map) if (!(now - (v?.at || 0) < IDEM_TTL_MS)) map.delete(k)
+  if (map.size > max) {
+    const olds = [...map.entries()].sort((a, b) => (a[1]?.at || 0) - (b[1]?.at || 0))
+    for (const [k] of olds.slice(0, map.size - max)) map.delete(k)
+  }
+  return map.size
+}
 
 /** 缺边界时的补法（2026-11-14 审查 M4 + 13:20 复核）：owner 的话「改口前一直算」，本鲸自己推的只算 30 天临时情报。 */
 const boundaryDefaults = (src, condition, validUntil) => {
@@ -83,11 +109,15 @@ function looksLikeMachineNoise(text) {
 const CJK_CHAR = /[\u4e00-\u9fff]/
 // 门槛 3 个中文字（2026-11-10 主人定）：原来 5 字让「生日」「名字」这类短标题永远记不上；
 // 宁多记一点，也别让短卡永远当不了证据。
-function containsRun(title, text, n = 3) {
+export function containsRun(title, text, n = 3) {
   const t = String(title || '')
-  if (!text || t.length < n) return false
-  for (let i = 0; i + n <= t.length; i += 1) {
-    const win = t.slice(i, i + n)
+  if (!text || !t) return false
+  // 标题比窗口还短时按标题全长比：'生日''名字' 这种 2 字标题以前 t.length < 3 直接 false，永远记不上（A5）。
+  // 但单字标题不当证据——一个字到处都有，比了等于没比。
+  const w = Math.min(n, t.length)
+  if (w < 2) return false
+  for (let i = 0; i + w <= t.length; i += 1) {
+    const win = t.slice(i, i + w)
     if (![...win].every((ch) => CJK_CHAR.test(ch))) continue
     if (text.includes(win)) return true
   }
@@ -220,8 +250,12 @@ const catalogLimit = countOr(config.catalogLimit, 130)
   // 再加一层 rev/CAS 等于把同一个问题做第二遍。幂等解决的是另一件事——调用方超时重发：
   // 同一句话连发两次该命中同一张卡，而不是靠 7 天相似去重碰运气（那个窗口的语义是「同一件事」，不是「同一次调用」）。
   const OPS_PATH = join(store.dir, 'ops.jsonl')
-  const IDEM_TTL_MS = 10 * 60_000
-  const idemIndex = new Map() // 幂等键 -> { id, at }
+  const idemIndex = new Map() // 幂等键 -> { id, at }（上限见 IDEM_MAX / sweepIdem）
+  // 写入口统一走这里：超上限就顺手清一遍，别等进程跑一整天攒成几千条。
+  const idemSet = (key, val) => {
+    idemIndex.set(key, val)
+    if (idemIndex.size > IDEM_MAX) sweepIdem(idemIndex, Date.now(), IDEM_MAX)
+  }
   try {
     const tail = existsSync(OPS_PATH) ? readFileSync(OPS_PATH, 'utf8').split('\n').filter(Boolean).slice(-500) : []
     for (const line of tail) {
@@ -231,6 +265,8 @@ const catalogLimit = countOr(config.catalogLimit, 130)
       } catch { /* 坏行跳过 */ }
     }
   } catch { /* 还没有日志 */ }
+  // 读回来的也可能超上限（末 500 行），load 完先清一次。
+  sweepIdem(idemIndex, Date.now(), IDEM_MAX)
   // 2026-11-20 复核补：ops.jsonl 原来只增不减（每次写卡一行、行里带整段 body），一年几十 MB。
   // 读侧只取末 500 行，所以轮转不损失幂等恢复能力；这里按行数滚，留末 1000 行。
   const OPS_MAX_LINES = 2000
@@ -289,7 +325,7 @@ const catalogLimit = countOr(config.catalogLimit, 130)
           // 不加的话账本会被重试稀释（旧契约：窗口内同一件事再记一次要变重）。
           const 是冲突卡 = args.conflict === true
           const t = 是冲突卡 ? 原卡 : (store.touch(原卡.id, Date.now(), 'idem', { dedupeMs: 60_000 }) || 原卡)
-          idemIndex.set(幂等键, { id: 原卡.id, at: Date.now() })
+          idemSet(幂等键, { id: 原卡.id, at: Date.now() })
           logOp({ op: 'idem_hit', id: 原卡.id, idem: 幂等键 })
           return {
             ok: true,
@@ -358,7 +394,7 @@ const catalogLimit = countOr(config.catalogLimit, 130)
         upgraded.valid_until = 去重边界.validUntil
         store.put(upgraded)
         const touched = store.touch(dupe.id, Date.now(), 'dedupe', { dedupeMs: 60_000 }) || store.get(dupe.id)
-        idemIndex.set(幂等键, { id: dupe.id, at: Date.now() })
+        idemSet(幂等键, { id: dupe.id, at: Date.now() })
         logOp({ op: 'dedupe', id: dupe.id, idem: 幂等键, sim: 冗余相似度 ?? null })
         // 两个分支的返回值形状要一致，别让调用方自己猜哪条是活重量。
         const nowDedupe = Date.now()
@@ -409,17 +445,24 @@ const catalogLimit = countOr(config.catalogLimit, 130)
     if (增量来源) body = `补：${增量来源.title || 增量来源.id}（${增量来源.id}）\n${body}`
     // 2026-11-14 审查（严重）：按 id 续写会把旧卡的 superseded_by 原样带回来 —— 返回 ok，卡却永远查不到、也不注入。
     // 续写的意思就是「这张卡还活着」：显式清死因；旧的有效期已经过期、这次又没给新的，也一并清掉，并在返回里说明。
-    const todayStr = localDay(Date.now())
+    const nowMs = Date.now()
+    const todayStr = localDay(nowMs)
     const 旧死因 = prev?.superseded_by ? `已被 ${prev.superseded_by} 接替` : ''
-    const 旧已过期 = prev?.valid_until && prev.valid_until < todayStr ? `旧有效期 ${prev.valid_until} 已过` : ''
+    // A4（2026-11-21 三合一复核）：以前拿 ISO 串（2026-11-21T07:27:58.900Z）跟纯日期串（2026-11-21）比大小，
+    // 时刻式有效期永远「比今天大」→ 过期卡续写不复活，返回 ok 但卡还是死的。统一用 expiryMs 跟现在的毫秒比。
+    const 旧到期Ms = expiryMs(prev?.valid_until || '')
+    const 旧已过期 = 旧到期Ms > 0 && 旧到期Ms < nowMs ? `旧有效期 ${prev.valid_until} 已过` : ''
     const 复活 = Boolean(旧死因 || 旧已过期)
     // 三态：不传 source 就保留旧卡的（以前缺省成 self，会悄悄把「主人亲口」降级，
     // 再叠加下面的 30 天临时情报规则，主人的话会在 30 天后静默失效——13:20 复核实测）。
     const src = args.source === undefined ? (prev?.source === 'owner' ? 'owner' : 'self') : (args.source === 'owner' ? 'owner' : 'self')
     let nextCondition = args.condition === undefined ? (prev?.condition || '') : clean(args.condition)
+    // 复活时「今天到期」的旧值也要清：那是上一轮被接替时盖的戳，不清明天又死。
+    // 判据：还没到期、且不是「纯日期＝今天」的那种戳，才继承旧值（时刻式今天晚些到期的照旧留着）。
+    const 旧是纯日期 = /^\d{4}-\d{2}-\d{2}$/.test(String(prev?.valid_until || '').trim())
+    const 旧值可留 = 旧到期Ms > nowMs && !(旧是纯日期 && 旧到期Ms === expiryMs(todayStr))
     let nextValidUntil = args.valid_until === undefined
-      // 复活时「今天到期」的旧值也要清：那是上一轮被接替时盖的戳，不清明天又死。
-      ? (prev?.valid_until && prev.valid_until > todayStr ? prev.valid_until : '')
+      ? (旧值可留 ? prev.valid_until : '')
       : clean(args.valid_until)
     // M4（11-14 审查）：condition 与 valid_until 两样都空，就跟 POLICY_TEXT 自相矛盾。
     // 不替主人编事实，只当场补一句诚实的边界（规则见 boundaryDefaults）。
@@ -480,13 +523,22 @@ const catalogLimit = countOr(config.catalogLimit, 130)
         store.put({ ...killer, supersedes: left.join(',') })
       }
     }
+    const 没接上 = []
     if (card.supersedes) {
       // 2026-11-14 审查（M5）：supersedes 支持一卡接多卡（逗号分隔），反向 superseded_by 也写成多值；
       // 不然「新卡同时接替两张旧卡」时只能记一条，另一条的反向链接永远补不上。
       const olds = String(card.supersedes).split(',').map((s) => s.trim()).filter(Boolean)
-      for (const oldId of olds) {
+      const allIds = store.ids()
+      for (const ref of olds) {
+        // 尾 4 位也要认（B1）：0 个=真没这张卡、>1 个=撞号，两种都别猜，写进返回里让人看见。
+        const got = resolveCardRef(store, ref, allIds)
+        if (got.ids.length !== 1) {
+          没接上.push(got.ids.length > 1 ? `${ref}（尾号撞了 ${got.ids.length} 张，请用完整 id）` : ref)
+          continue
+        }
+        const oldId = got.ids[0]
         const old = oldId === card.id ? null : store.get(oldId)
-        if (!old) continue
+        if (!old) { 没接上.push(ref); continue }
         const links = String(old.superseded_by || '').split(',').map((s) => s.trim()).filter(Boolean)
         if (!links.includes(card.id)) links.push(card.id)
         store.put({
@@ -497,13 +549,14 @@ const catalogLimit = countOr(config.catalogLimit, 130)
         })
       }
     }
-    idemIndex.set(幂等键, { id: card.id, at: Date.now() })
+    idemSet(幂等键, { id: card.id, at: Date.now() })
     logOp({ op: prev ? 'update' : 'create', id: card.id, idem: 幂等键, kind: card.kind, source: card.source })
     const nowAfter = Date.now()
     // pinned 的卡不走衰减：这里也用同一套算法，别让返回值跟实际分档打架。
     const liveAfter = liveWeightOf(card, nowAfter, store.heat)
     // 返回里把这一笔写清：复活过谁、边界是怎么补的。别让调用方以为「ok 就是什么都没变」。
     const notes = []
+    if (没接上.length) notes.push(`supersedes 没接上：「${没接上.join('、')}」库里查不到这张卡，旧卡没被标过期——要接替它请用完整 id`)
     if (复活) notes.push(`这张卡原来挂着旧死因（${[旧死因, 旧已过期].filter(Boolean).join('，')}），续写后已复活`)
     if (边界说明) notes.push(边界说明)
     if (场合说明) notes.push(场合说明)
@@ -582,13 +635,8 @@ const catalogLimit = countOr(config.catalogLimit, 130)
         // 不必再拿自然语言重猜一句。先认完整 id，再认尾 4 位唯一匹配；多解单列，别混进「没对上」。
         // 模型可能照抄成 [xxxx] / 【xxxx】：先剥壳再匹配。
         if (Array.isArray(args.ids) && args.ids.length > 0) {
+          // 尾 4 位解析统一走 resolveCardRef：以前这里另抄一份，写侧忘了跟，于是 supersedes 静默失效（B1）。
           const allIds = store.ids()
-          const tail4 = new Map()
-          for (const id of allIds) {
-            const t = String(id).slice(-4)
-            if (!tail4.has(t)) tail4.set(t, [])
-            tail4.get(t).push(id)
-          }
           // 判死跟 cue 路径同口径：valid_until 写纯日期时按本地日界算，别拿 Date.parse 当 UTC 零点（2026-11-21 B3）。
           const isDeadCard = (c) => isDead(c, Date.now())
           const picked = []
@@ -598,14 +646,16 @@ const catalogLimit = countOr(config.catalogLimit, 130)
           const cueOf = new Map()
           for (const want of args.ids.slice(0, 10)) {
             const raw = clean(String(want ?? ''))
-            const w = raw.replace(/^[\[【（(]+/, '').replace(/[\]】）)]+$/, '').trim()
+            const got = resolveCardRef(store, want, allIds)
+            const w = got.want
             if (!w) continue
-            const hit = allIds.includes(w) ? [w] : (tail4.get(w) || [])
+            const hit = got.ids
             if (hit.length === 1) {
               const card = store.get(hit[0])
-              // 同一张卡在 ids 里出现两次时只取一次（否则重复 touch、返回值也重复，2026-11-21 #2）。
-              if (card && !seenIds.has(card.id)) { seenIds.add(card.id); picked.push(card); cueOf.set(card.id, raw) }
-              else missed.push(w)
+              // 同一张卡在 ids 里出现两次时只取一次（否则重复 touch、返回值也重复，2026-11-21 #2）；
+              // 但「重复」不是「没对上」，别报进 missed（A8 / 千问 R5）。只有真查不到卡才算没对上。
+              if (!card) missed.push(w)
+              else if (!seenIds.has(card.id)) { seenIds.add(card.id); picked.push(card); cueOf.set(card.id, raw) }
             } else if (hit.length > 1) {
               ambiguous.push({ 短id: w, 候选: hit.slice(0, 4) })
             } else {
