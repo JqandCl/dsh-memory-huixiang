@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory-huixiang",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "回响 HuiXiang：给 AI 一个记得住人的本地记忆库。纯文本外文库 + 记忆重量 + 因果链 + 触发词召回，零依赖、不上云。",
   "license": "MIT",
   "repository": {

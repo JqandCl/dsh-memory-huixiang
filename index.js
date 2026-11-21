@@ -570,7 +570,7 @@ const catalogLimit = countOr(config.catalogLimit, 130)
           ids: { type: 'array', items: { type: 'string' }, maxItems: 10, description: '按短 id 直接取全文（便签行里 [xxxx] 那个；也认完整 id 或尾 4 位）。给 ids 时 cue 可以不传，比猜自然语言准。' },
           cues: { type: 'array', items: { type: 'string' }, maxItems: 10, description: '换几种说法一次查（可选）：命中任一种就算捞到，取最高分。' },
           includeSuperseded: { type: 'boolean', description: '连已被接替/过期的旧卡一起翻（审计用，默认 false）。' },
-          limit: { type: 'number', minimum: 1, maximum: 10, description: '最多几条，默认 3。' },
+          limit: { type: 'number', minimum: 1, maximum: 10, description: '最多几条，默认 5。跨事件的问题（谁先/一共/比较/两次）给到 6~8。' },
         },
       },
       output: TEXT({ type: 'object' }),
@@ -642,7 +642,9 @@ const catalogLimit = countOr(config.catalogLimit, 130)
         // 原来单字线索（猫/雨/酒）一律被拦，等于查不了。门控只留给自动检索那条路。
 
         // limit 传字符串/NaN 时 Math.trunc 得 NaN → slice(0,NaN)=[] → 命中被吞成 not_found（2026-11-21 B9）。
-        const limit = Math.min(Math.max(Math.trunc(Number(args.limit) || 3), 1), 10)
+        // 默认给 5 条（2026-11-21 全量 500 题实验：top3→top6 让 4~6 段题从 10/33 涨到 21/33，
+        // 总分 80.8%→83.0%，逼近「全给原文」上限 83.8%；卡都很短，多两条比答错划算）。
+        const limit = Math.min(Math.max(Math.trunc(Number(args.limit) || 5), 1), 10)
         const opts = { limit, includeSuperseded: args.includeSuperseded === true }
         const runs = cues.map((c) => ({ cue: c, r: recallByCue(store, c, opts) }))
         // 合并：同一张卡只留分数最高那次，并记住是哪句说法捞到的（记账要用真的那句）。
@@ -708,10 +710,17 @@ const catalogLimit = countOr(config.catalogLimit, 130)
             gateNote = `实体槽未命中：${g.missing.join('/')}`
           }
         }
+        // 被 limit 截断时说一句：让模型知道库里还有更多，值得把 limit 调大再查一次，
+        // 而不是以为「库里就这几条」直接作答（2026-11-21 全量 500 题：多段题就吃亏在这）。
+        const 候选总数 = Number(topRun?.r.候选总数 || 0)
+        if (status === 'matched' && 候选总数 > items.length) {
+          reason = (reason ? `${reason}；` : '') + `库里还有 ${候选总数 - items.length} 条相关，要看得更全就把 limit 调大再查一次`
+        }
         const result = {
           status,
           items,
           reason,
+          ...(候选总数 ? { 候选总数 } : {}),
           兜底,
           拆解: topRun?.r.拆解 || '',
           ...(gateNote ? { 出口闸: gateNote } : {}),
