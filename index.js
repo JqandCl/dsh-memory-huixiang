@@ -854,32 +854,44 @@ const catalogLimit = countOr(config.catalogLimit, 130)
   for (const def of definitions) ctx.effect(() => ctx.tools.register(def), `cyber-hippocampus: ${def.name}`)
 
   // 一轮压缩会被拆成好多条 prune，先攒着，等 end/summary 时记成一笔。
-  let folding = null
+  // 按会话分开：两个窗口可能同时在压自己的历史，共用一个变量会串账、丢账（2026-11-21 #6）。
+  const foldings = new Map()
+  const FOLD_TTL_MS = 60 * 60 * 1000 // 只见 start 不见 end 的僵尸账，1 小时后自清，别越攒越多
+  const foldOf = (key, now = Date.now()) => {
+    for (const [k, v] of foldings) if (now - v.at > FOLD_TTL_MS) foldings.delete(k)
+    let f = foldings.get(key)
+    if (!f) {
+      f = { tokens: 0, seqStart: null, seqEnd: null, at: now }
+      foldings.set(key, f)
+    }
+    return f
+  }
 
   ctx.on('session/event', (session, event) => {
     try {
       if (session?.id) lastSessionId = session.id
       const type = event?.type || event?.kind
       const data = event?.data ?? event ?? {}
+      const foldKey = String(session?.id || '')
 
       if (type === 'compaction/start') {
-        folding = { tokens: 0, seqStart: null, seqEnd: null }
+        foldings.set(foldKey, { tokens: 0, seqStart: null, seqEnd: null, at: Date.now() })
         return
       }
       if (type === 'compaction/prune') {
-        folding = folding || { tokens: 0, seqStart: null, seqEnd: null }
-        folding.tokens += Number(data.shadowedTokenCount) || 0
+        const f = foldOf(foldKey)
+        f.at = Date.now()
+        f.tokens += Number(data.shadowedTokenCount) || 0
         const start = data?.shadowedRange?.start
         const end = data?.shadowedRange?.end
-        if (Number.isFinite(start)) folding.seqStart = folding.seqStart === null ? start : Math.min(folding.seqStart, start)
-        if (Number.isFinite(end)) folding.seqEnd = folding.seqEnd === null ? end : Math.max(folding.seqEnd, end)
+        if (Number.isFinite(start)) f.seqStart = f.seqStart === null ? start : Math.min(f.seqStart, start)
+        if (Number.isFinite(end)) f.seqEnd = f.seqEnd === null ? end : Math.max(f.seqEnd, end)
         return
       }
       if (type === 'compaction/summary' || type === 'compaction/end') {
-        if (folding && folding.tokens > 0) {
-          store.recordCompaction(folding)
-          folding = null
-        }
+        const f = foldings.get(foldKey)
+        if (f && f.tokens > 0) store.recordCompaction(f)
+        foldings.delete(foldKey)
         return
       }
 
